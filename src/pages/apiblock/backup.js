@@ -1,9 +1,13 @@
-import React, { useState, useEffect } from "react";
+import { useServiceCode } from "@/context/ServiceCodeContext";
 import axios from "axios";
-import { useRouter } from "next/router";
-import data from "../../config.json";
+import { FileText, Lock, Pencil, Trash, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { toast } from "react-toastify";
 
-export default function DynamicApiBlock({ config = data[0] }) {
+export default function DynamicApiBlock({}) {
+  const { config } = useServiceCode();
+
+  if (!config) return <p>Loading...</p>;
   const [authValues, setAuthValues] = useState({});
   const [inputValues, setInputValues] = useState({});
   const [records, setRecords] = useState([]);
@@ -154,11 +158,11 @@ export default function DynamicApiBlock({ config = data[0] }) {
     } catch (error) {
       console.error("API call error:", error);
       if (error.response) {
-        throw new Error(
+        toast.error(
           `API call failed: ${error.response.status} ${error.response.statusText}`
         );
       }
-      throw error;
+      return;
     }
   };
 
@@ -166,7 +170,8 @@ export default function DynamicApiBlock({ config = data[0] }) {
   const executeOperation = async (operationType, params = {}) => {
     const operation = config.operations?.[operationType];
     if (!operation) {
-      throw new Error(`Operation ${operationType} not configured`);
+      toast.error(`Operation ${operationType} not configured`);
+      return;
     }
 
     // Check required fields
@@ -175,7 +180,8 @@ export default function DynamicApiBlock({ config = data[0] }) {
         (field) => !inputValues[field]
       );
       if (missingFields.length > 0) {
-        throw new Error(`Missing required fields: ${missingFields.join(", ")}`);
+        toast.error(`Missing required fields: ${missingFields.join(", ")}`);
+        return;
       }
     }
 
@@ -250,6 +256,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
       setDropdownData((prev) => ({ ...prev, [input.key]: options }));
     } catch (error) {
       console.error("Error loading dynamic dropdown:", error);
+      toast.error(`Failed to load ${input.label} options`);
       setError(`Failed to load ${input.label} options`);
     } finally {
       setLoading(false);
@@ -294,12 +301,14 @@ export default function DynamicApiBlock({ config = data[0] }) {
       console.log("records", records);
 
       setRecords(records);
+      toast.success(`Successfully loaded ${records.length} records`);
     } catch (error) {
       console.error("Fetch records failed:", error);
-      setError(
+      const errorMessage =
         error.message ||
-          "Failed to fetch records. Please check your permissions."
-      );
+        "Failed to fetch records. Please check your permissions.";
+      setError(errorMessage);
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -314,7 +323,9 @@ export default function DynamicApiBlock({ config = data[0] }) {
       .map((input) => input.label);
 
     if (missingFields.length > 0) {
-      setError(`Please fill in: ${missingFields.join(", ")}`);
+      const errorMessage = `Please fill in: ${missingFields.join(", ")}`;
+      setError(errorMessage);
+      toast.warn(errorMessage);
       return;
     }
 
@@ -326,6 +337,13 @@ export default function DynamicApiBlock({ config = data[0] }) {
       const params = editingId !== null ? { recordId: editingId } : {};
 
       await executeOperation(operationType, params);
+
+      // Show success message
+      const successMessage =
+        editingId !== null
+          ? "Record updated successfully!"
+          : "Record created successfully!";
+      toast.success(successMessage);
 
       // Reset form
       const resetFields = {};
@@ -339,10 +357,11 @@ export default function DynamicApiBlock({ config = data[0] }) {
       await fetchRecords();
     } catch (error) {
       console.error("Submit failed:", error);
-      setError(
+      const errorMessage =
         error.message ||
-          `Failed to ${editingId !== null ? "update" : "add"} record`
-      );
+        `Failed to ${editingId !== null ? "update" : "add"} record`;
+      setError(errorMessage);
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -359,10 +378,13 @@ export default function DynamicApiBlock({ config = data[0] }) {
 
     try {
       await executeOperation("delete", { recordId: id });
+      toast.success("Record deleted successfully!");
       await fetchRecords();
     } catch (error) {
       console.error("Delete failed:", error);
-      setError(error.message || "Failed to delete record");
+      const errorMessage = error.message || "Failed to delete record";
+      setError(errorMessage);
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -383,6 +405,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
           access_token: token,
         }));
         setIsAuthenticated(true);
+        toast.success("Successfully authenticated!");
         window.history.replaceState(null, null, window.location.pathname);
       }
     } else if (params.get("access_token")) {
@@ -394,6 +417,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
           access_token: token,
         }));
         setIsAuthenticated(true);
+        toast.success("Successfully authenticated!");
         window.history.replaceState({}, document.title, "/");
       }
     }
@@ -405,7 +429,19 @@ export default function DynamicApiBlock({ config = data[0] }) {
     const flowType = config.auth?.flow;
 
     if (flowType === "REDIRECT" && authType === "OAUTH2") {
-      const clientId = config.auth.clientId;
+      // Get clientId from auth fields instead of config.auth.clientId
+      const clientIdField = config.auth.fields?.find(
+        (field) => field.key === "clientId"
+      );
+      const clientId = authValues[clientIdField?.key];
+
+      if (!clientId) {
+        const errorMessage = "Please enter your Client ID";
+        setError(errorMessage);
+        toast.warn(errorMessage);
+        return;
+      }
+
       const redirectUri = config.auth.redirectUri;
       const scope = config.auth.scopes;
 
@@ -421,13 +457,21 @@ export default function DynamicApiBlock({ config = data[0] }) {
 
     // Handle manual input-based auth (API Key, etc.)
     if (config.auth?.fields?.length) {
-      const firstField = config.auth.fields[0];
-      if (authValues[firstField.key]) {
-        setIsAuthenticated(true);
-        setError("");
-      } else {
-        setError(`Please enter your ${firstField.label}`);
+      const missingFields = config.auth.fields
+        .filter((field) => field.required)
+        .filter((field) => !authValues[field.key])
+        .map((field) => field.label);
+
+      if (missingFields.length > 0) {
+        const errorMessage = `Please enter: ${missingFields.join(", ")}`;
+        setError(errorMessage);
+        toast.warn(errorMessage);
+        return;
       }
+
+      setIsAuthenticated(true);
+      setError("");
+      toast.success("Successfully authenticated!");
     }
   };
 
@@ -538,25 +582,14 @@ export default function DynamicApiBlock({ config = data[0] }) {
     const authFlow = config.auth?.flow;
     const hasFields = config.auth?.fields?.length > 0;
     const isManualFlow = authFlow === "MANUAL";
+    const isRedirectFlow = authFlow === "REDIRECT";
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
         <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
           <div className="text-center mb-8">
             <div className="w-16 h-16 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg
-                className="w-8 h-8 text-white"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-                />
-              </svg>
+              <Lock className="w-8 h-8 text-white" />
             </div>
             <h1 className="text-2xl font-bold text-gray-900 mb-2">
               {config.name}
@@ -571,9 +604,8 @@ export default function DynamicApiBlock({ config = data[0] }) {
           )}
 
           <div className="space-y-4">
-            {/* Render input fields only if MANUAL flow */}
-            {isManualFlow &&
-              hasFields &&
+            {/* Render input fields for both MANUAL and REDIRECT flows if fields exist */}
+            {hasFields &&
               config.auth.fields.map((field) => (
                 <div key={field.key}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -598,16 +630,17 @@ export default function DynamicApiBlock({ config = data[0] }) {
                 </div>
               ))}
 
-            {/* Single dynamic button for both flows */}
+            {/* Dynamic button for authentication */}
             <button
               onClick={handleAuth}
-              disabled={
-                isManualFlow &&
-                (!authValues[config.auth.fields[0]?.key] || loading)
-              }
+              disabled={loading}
               className="w-full bg-gradient-to-r from-blue-500 to-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:from-blue-600 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? "Connecting..." : `Connect to ${config.service}`}
+              {loading
+                ? "Connecting..."
+                : isRedirectFlow
+                ? `Connect to ${config.service}`
+                : `Authenticate ${config.service}`}
             </button>
           </div>
         </div>
@@ -703,19 +736,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
                     onClick={resetForm}
                     className="text-gray-500 hover:text-gray-700 transition-colors"
                   >
-                    <svg
-                      className="w-5 h-5"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth="2"
-                        d="M6 18L18 6M6 6l12 12"
-                      />
-                    </svg>
+                    <X className="w-5 h-5" />
                   </button>
                 )}
               </div>
@@ -783,19 +804,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
 
           {records.length === 0 ? (
             <div className="p-12 text-center">
-              <svg
-                className="w-12 h-12 text-gray-400 mx-auto mb-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth="2"
-                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                />
-              </svg>
+              <FileText className="w-12 h-12 text-gray-400 mx-auto mb-4" />
               <h3 className="text-lg font-medium text-gray-900 mb-2">
                 No records found
               </h3>
@@ -877,19 +886,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
                               className="text-blue-600 hover:text-blue-900 transition-colors"
                               title="Edit"
                             >
-                              <svg
-                                className="w-4 h-4"
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth="2"
-                                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                                />
-                              </svg>
+                              <Pencil className="w-4 h-4" />
                             </button>
                             <button
                               onClick={() =>
@@ -902,19 +899,7 @@ export default function DynamicApiBlock({ config = data[0] }) {
                               className="text-red-600 hover:text-red-900 transition-colors"
                               title="Delete"
                             >
-                              <svg
-                                className="w-4 h-4"
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth="2"
-                                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                                />
-                              </svg>
+                              <Trash className="w-4 h-4" />
                             </button>
                           </div>
                         </td>

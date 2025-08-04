@@ -1,11 +1,11 @@
+import { useServiceCode } from "@/context/ServiceCodeContext";
 import axios from "axios";
 import { FileText, Lock, Pencil, Trash, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "react-toastify";
-import data from "../../config.json";
-import { useServiceCode } from "@/context/ServiceCodeContext";
+import ReactJson from "react-json-view"; // 👈 import this at top
 
-export default function DynamicApiBlock({  }) {
+export default function DynamicApiBlock({}) {
   const { config } = useServiceCode();
 
   if (!config) return <p>Loading...</p>;
@@ -74,12 +74,15 @@ export default function DynamicApiBlock({  }) {
     return processedUrl;
   };
 
-  // Dynamic payload replacement function
+  //   Dynamic payload replacement function
   const replacePayloadPlaceholders = (payload, params = {}) => {
     if (!payload) return null;
 
     let processedPayload = JSON.parse(JSON.stringify(payload));
+    
     const allValues = { ...inputValues, ...authValues, ...params };
+    console.log("processedPayload", processedPayload);
+    console.log("allValues", allValues);
 
     const replacePlaceholders = (obj) => {
       if (typeof obj === "string") {
@@ -159,19 +162,21 @@ export default function DynamicApiBlock({  }) {
     } catch (error) {
       console.error("API call error:", error);
       if (error.response) {
-        throw new Error(
+        toast.error(
           `API call failed: ${error.response.status} ${error.response.statusText}`
         );
       }
-      throw error;
+      return;
     }
   };
 
   // Dynamic operation executor
   const executeOperation = async (operationType, params = {}) => {
     const operation = config.operations?.[operationType];
+
     if (!operation) {
-      throw new Error(`Operation ${operationType} not configured`);
+      toast.error(`Operation ${operationType} not configured`);
+      return;
     }
 
     // Check required fields
@@ -180,7 +185,8 @@ export default function DynamicApiBlock({  }) {
         (field) => !inputValues[field]
       );
       if (missingFields.length > 0) {
-        throw new Error(`Missing required fields: ${missingFields.join(", ")}`);
+        toast.error(`Missing required fields: ${missingFields.join(", ")}`);
+        return;
       }
     }
 
@@ -189,7 +195,9 @@ export default function DynamicApiBlock({  }) {
 
     // Build payload
     const payload = replacePayloadPlaceholders(operation.payload, params);
+    console.log("payload line 194", payload);
 
+    return {};
     // Build headers
     const headers = getAuthHeader(operation);
 
@@ -300,7 +308,7 @@ export default function DynamicApiBlock({  }) {
       console.log("records", records);
 
       setRecords(records);
-      toast.success(`Successfully loaded ${records.length} records`);
+      toast.success(`Successfully loaded ${records?.length} records`);
     } catch (error) {
       console.error("Fetch records failed:", error);
       const errorMessage =
@@ -336,7 +344,7 @@ export default function DynamicApiBlock({  }) {
       const params = editingId !== null ? { recordId: editingId } : {};
 
       await executeOperation(operationType, params);
-
+      return;
       // Show success message
       const successMessage =
         editingId !== null
@@ -351,7 +359,6 @@ export default function DynamicApiBlock({  }) {
       });
       setInputValues((prev) => ({ ...prev, ...resetFields }));
       setEditingId(null);
-
       // Refresh records
       await fetchRecords();
     } catch (error) {
@@ -417,7 +424,7 @@ export default function DynamicApiBlock({  }) {
         }));
         setIsAuthenticated(true);
         toast.success("Successfully authenticated!");
-        window.history.replaceState({}, document.title, "/");
+        window?.history.replaceState({}, document?.title, "/");
       }
     }
   }, []);
@@ -428,7 +435,19 @@ export default function DynamicApiBlock({  }) {
     const flowType = config.auth?.flow;
 
     if (flowType === "REDIRECT" && authType === "OAUTH2") {
-      const clientId = config.auth.clientId;
+      // Get clientId from auth fields instead of config.auth.clientId
+      const clientIdField = config.auth.fields?.find(
+        (field) => field.key === "clientId"
+      );
+      const clientId = authValues[clientIdField?.key];
+
+      if (!clientId) {
+        const errorMessage = "Please enter your Client ID";
+        setError(errorMessage);
+        toast.warn(errorMessage);
+        return;
+      }
+
       const redirectUri = config.auth.redirectUri;
       const scope = config.auth.scopes;
 
@@ -444,16 +463,21 @@ export default function DynamicApiBlock({  }) {
 
     // Handle manual input-based auth (API Key, etc.)
     if (config.auth?.fields?.length) {
-      const firstField = config.auth.fields[0];
-      if (authValues[firstField.key]) {
-        setIsAuthenticated(true);
-        setError("");
-        toast.success("Successfully authenticated!");
-      } else {
-        const errorMessage = `Please enter your ${firstField.label}`;
+      const missingFields = config.auth.fields
+        .filter((field) => field.required)
+        .filter((field) => !authValues[field.key])
+        .map((field) => field.label);
+
+      if (missingFields.length > 0) {
+        const errorMessage = `Please enter: ${missingFields.join(", ")}`;
         setError(errorMessage);
         toast.warn(errorMessage);
+        return;
       }
+
+      setIsAuthenticated(true);
+      setError("");
+      toast.success("Successfully authenticated!");
     }
   };
 
@@ -533,6 +557,75 @@ export default function DynamicApiBlock({  }) {
           </div>
         );
 
+      case "key_value":
+        return (
+          <div className="mb-4 flex gap-2 items-center">
+            <select
+              value={inputValues[field.key]}
+              onChange={(e) => {
+                setInputValues((prev) => ({
+                  ...prev,
+                  [field.key]: e.target.value,
+                }));
+                setError("");
+              }}
+              className="px-3 py-2 border border-gray-300 rounded"
+            >
+              <option value="">Select {field.label}</option>
+              {(field.keyOptions || []).map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            <input
+              type="text"
+              placeholder={field.valueFieldLabel || "Enter value"}
+              value={inputValues.Value}
+              onChange={(e) => {
+                setInputValues((prev) => ({
+                  ...prev,
+                  Value: e.target.value,
+                }));
+                setError("");
+              }}
+              className="flex-1 px-3 py-2 border border-gray-300 rounded"
+            />
+          </div>
+        );
+
+      case "json":
+        return (
+          <div className="border border-gray-300 rounded p-2">
+            <ReactJson
+              name={false}
+              src={inputValues[field.key] || {}}
+              onEdit={(e) => {
+                setInputValues((prev) => ({
+                  ...prev,
+                  [field.key]: e.updated_src,
+                }));
+              }}
+              onAdd={(e) => {
+                setInputValues((prev) => ({
+                  ...prev,
+                  [field.key]: e.updated_src,
+                }));
+              }}
+              onDelete={(e) => {
+                setInputValues((prev) => ({
+                  ...prev,
+                  [field.key]: e.updated_src,
+                }));
+              }}
+              displayDataTypes={false}
+              displayObjectSize={false}
+              theme="rjv-default"
+            />
+          </div>
+        );
+
       default:
         return (
           <input
@@ -564,6 +657,7 @@ export default function DynamicApiBlock({  }) {
     const authFlow = config.auth?.flow;
     const hasFields = config.auth?.fields?.length > 0;
     const isManualFlow = authFlow === "MANUAL";
+    const isRedirectFlow = authFlow === "REDIRECT";
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
@@ -585,9 +679,8 @@ export default function DynamicApiBlock({  }) {
           )}
 
           <div className="space-y-4">
-            {/* Render input fields only if MANUAL flow */}
-            {isManualFlow &&
-              hasFields &&
+            {/* Render input fields for both MANUAL and REDIRECT flows if fields exist */}
+            {hasFields &&
               config.auth.fields.map((field) => (
                 <div key={field.key}>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -612,16 +705,17 @@ export default function DynamicApiBlock({  }) {
                 </div>
               ))}
 
-            {/* Single dynamic button for both flows */}
+            {/* Dynamic button for authentication */}
             <button
               onClick={handleAuth}
-              disabled={
-                isManualFlow &&
-                (!authValues[config.auth.fields[0]?.key] || loading)
-              }
+              disabled={loading}
               className="w-full bg-gradient-to-r from-blue-500 to-indigo-600 text-white py-3 px-6 rounded-lg font-semibold hover:from-blue-600 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? "Connecting..." : `Connect to ${config.service}`}
+              {loading
+                ? "Connecting..."
+                : isRedirectFlow
+                ? `Connect to ${config.service}`
+                : `Authenticate ${config.service}`}
             </button>
           </div>
         </div>
@@ -724,17 +818,20 @@ export default function DynamicApiBlock({  }) {
             </div>
             <div className="p-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {getDataFields().map((field) => (
-                  <div key={field.key}>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      {field.label}
-                      {field.required && (
-                        <span className="text-red-500 ml-1">*</span>
-                      )}
-                    </label>
-                    {renderInput(field)}
-                  </div>
-                ))}
+                {getDataFields().map((field) => {
+                  if (field.visible === false) return null; // Skip rendering if visible is false
+                  return (
+                    <div key={field.key}>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        {field.label}
+                        {field.required && (
+                          <span className="text-red-500 ml-1">*</span>
+                        )}
+                      </label>
+                      {renderInput(field)}
+                    </div>
+                  );
+                })}
               </div>
 
               <div className="mt-6 flex gap-3">
