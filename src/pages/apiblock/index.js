@@ -21,7 +21,7 @@ function usePersistedState(key, defaultValue) {
     try {
       window.localStorage.setItem(key, JSON.stringify(state));
     } catch {
-      // ignore write errors (quota, disabled, etc.)
+      // ignore write errors
     }
   }, [key, state]);
 
@@ -30,9 +30,8 @@ function usePersistedState(key, defaultValue) {
 
 export default function DynamicApiBlock({}) {
   const { config } = useServiceCode();
-
   if (!config) return <p>Loading...</p>;
-  // instead of useState, import your helper:
+
   const [authValues, setAuthValues] = usePersistedState(
     "DynamicApiBlock.authValues",
     {}
@@ -50,407 +49,127 @@ export default function DynamicApiBlock({}) {
     false
   );
 
-  // everything else stays as normal useState:
   const [records, setRecords] = useState([]);
   const [dropdownData, setDropdownData] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  if (!config) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <h2 className="text-xl font-semibold text-gray-900 mb-2">
-            No Configuration Found
-          </h2>
-          <p className="text-gray-600">
-            Please provide a valid configuration object.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  // --- Utility Functions ---
+  const getConfigFields = () =>
+    config.inputs?.filter((input) =>
+      ["baseId", "tableName", "query"].includes(input.key)
+    ) || [];
 
-  // Get configuration fields
-  const getConfigFields = () => {
-    return (
-      config.inputs?.filter((input) =>
-        ["baseId", "tableName", "query"].includes(input.key)
-      ) || []
-    );
-  };
+  const getDataFields = () =>
+    config.inputs?.filter(
+      (input) => !["baseId", "tableName", "query"].includes(input.key)
+    ) || [];
 
-  // Get data fields (excluding config fields)
-  const getDataFields = () => {
-    return (
-      config.inputs?.filter(
-        (input) => !["baseId", "tableName", "query"].includes(input.key)
-      ) || []
-    );
-  };
-
-  // Dynamic URL replacement function
-  const replaceUrlPlaceholders = (url, params = {}) => {
-    let processedUrl = url;
-
-    // Replace baseurl
-    processedUrl = processedUrl.replace("{baseurl}", config.baseurl);
-
-    // Replace other placeholders with values from inputValues, authValues, or params
-    const allValues = { ...inputValues, ...authValues, ...params };
-
-    Object.keys(allValues).forEach((key) => {
-      const placeholder = `{${key}}`;
-      if (processedUrl.includes(placeholder)) {
-        processedUrl = processedUrl.replace(
-          placeholder,
-          encodeURIComponent(allValues[key])
-        );
+  // --- Value Assembly Functions ---
+  const buildDataFields = () => {
+    const data = {};
+    getDataFields().forEach((field) => {
+      let value = inputValues[field.key];
+      if (value === undefined || value === "") return;
+      switch (field.type) {
+        case "number":
+          data[field.key] = Number(value);
+          break;
+        case "json":
+          data[field.key] =
+            typeof value === "string" ? JSON.parse(value) : value;
+          break;
+        default:
+          data[field.key] = value;
       }
     });
-
-    return processedUrl;
+    return data;
   };
+  const buildValuesArray = () =>
+    getDataFields().map((f) => inputValues[f.key] || "");
 
-  //   Dynamic payload replacement function
-  const replacePayloadPlaceholders = (payload, params = {}) => {
-    if (!payload) return null;
-
-    let processedPayload = JSON.parse(JSON.stringify(payload));
-
-    const allValues = { ...inputValues, ...authValues, ...params };
-
-    const replacePlaceholders = (obj) => {
-      console.log("obj", obj);
-
-      if (typeof obj === "string") {
-        // Handle special placeholders
-        if (obj === "{dataFields}") {
-          const fields = {};
-          getDataFields().forEach((field) => {
-            const value = inputValues[field.key];
-            if (value === undefined || value === "") return;
-
-            switch (field.type) {
-              case "number":
-                fields[field.key] = Number(value);
-                break;
-
-              case "json":
-                // stringify the object so Airtable long-text can store it
-                fields[field.key] = JSON.stringify(value);
-                break;
-
-              default:
-                fields[field.key] = value;
-            }
-          });
-          return fields;
-        }
-
-        if (obj === "{valuesArray}") {
-          return getDataFields().map((field) => inputValues[field.key] || "");
-        }
-
-        // Replace regular placeholders
-        Object.keys(allValues).forEach((key) => {
-          const placeholder = `{${key}}`;
-          if (obj.includes && obj.includes(placeholder)) {
-            obj = obj.replace(placeholder, allValues[key]);
-          }
-        });
-        return obj;
-      } else if (Array.isArray(obj)) {
-        return obj.map((item) => replacePlaceholders(item));
-      } else if (typeof obj === "object" && obj !== null) {
-        const result = {};
-        Object.keys(obj).forEach((key) => {
-          result[key] = replacePlaceholders(obj[key]);
-        });
-        return result;
-      }
-      return obj;
-    };
-
-    return replacePlaceholders(processedPayload);
-  };
-
-  // Dynamic auth header creation
-  const getAuthHeader = (operation) => {
-    if (!operation) return {};
-
-    if (operation.authMethod === "header") {
-      const authKey = operation.authField;
-      const authValue = authValues[authKey];
-
-      if (authKey === "apiKey") {
-        return { Authorization: `Bearer ${authValue}` };
-      } else if (authKey === "access_token") {
-        return { Authorization: `Bearer ${authValue}` };
-      }
+  // --- Build credentials object for block/operation ---
+  const getCredentials = () => {
+    if (config.auth?.type === "API_KEY") {
+      return { apiKey: authValues.apiKey };
     }
-
+    if (config.auth?.type === "OAUTH2") {
+      return {
+        clientId: authValues.clientId,
+        secretId: authValues.secretId,
+        access_token: authValues.access_token,
+        refresh_token: authValues.refresh_token,
+        expires_at: authValues.expires_at,
+      };
+    }
     return {};
   };
 
-  // Generic API call function using axios
-  const makeApiCall = async (url, options = {}) => {
-    try {
-      const axiosConfig = {
-        url,
-        method: options.method || "GET",
-        headers: {
-          "Content-Type": "application/json",
-          ...options.headers,
-        },
-        data: options.body ? options.body : undefined,
-      };
-
-      const response = await axios(axiosConfig);
-      return response.data;
-    } catch (error) {
-      console.error("API call error:", error);
-      if (error.response) {
-        toast.error(
-          `API call failed: ${error.response.status} ${error.response.statusText}`
-        );
-      }
-      return;
-    }
-  };
-
-  //  Replace all makeApiCall calls with makeApiCallWithTokenRefresh
-  // Update your executeOperation function
-  const executeOperation = async (operationType, params = {}) => {
-    const operation = config.operations?.[operationType];
-
-    if (!operation) {
-      toast.error(`Operation ${operationType} not configured`);
-      return;
-    }
-
-    // Check required fields
-    if (operation.requiredFields) {
-      const missingFields = operation.requiredFields.filter(
-        (field) => !inputValues[field]
-      );
-      if (missingFields.length > 0) {
-        toast.error(`Missing required fields: ${missingFields.join(", ")}`);
-        return;
-      }
-    }
-
-    // Build URL
-    const url = replaceUrlPlaceholders(operation.url, params);
-
-    // Build payload
-    const payload = replacePayloadPlaceholders(operation.payload, params);
-
-    // Build headers
-    const headers = getAuthHeader(operation);
-
-    // Make API call with token refresh handling
-    const options = {
-      method: operation.method,
-      headers,
-      body: payload,
-    };
-
-    const response = await makeApiCallWithTokenRefresh(url, options);
-
-    // Extract data based on responseField
-    let data = response;
-    if (operation.responseField) {
-      data = response[operation.responseField] || [];
-    }
-    return data;
-  };
-
-  //    Add token refresh check interval
-  useEffect(() => {
-    if (!isAuthenticated || !authValues.refresh_token) return;
-
-    const checkTokenInterval = setInterval(() => {
-      const expiresAt = authValues.expires_at;
-      if (!expiresAt) return;
-
-      // Check if token expires in next 10 minutes
-      const bufferTime = 10 * 60 * 1000; // 10 minutes
-      if (Date.now() > expiresAt - bufferTime) {
-        console.log("Token expires soon, refreshing...");
-
-        // Refresh token proactively
-        axios
-          .post(`${config.baseurl}/oauth/refresh`, {
-            refresh_token: authValues.refresh_token,
-          })
-          .then((response) => {
-            const newTokenData = response.data;
-            handleOAuthSuccess(newTokenData);
-            console.log("Token refreshed proactively");
-          })
-          .catch((error) => {
-            console.error("Proactive token refresh failed:", error);
-            // Don't force logout here, let the next API call handle it
-          });
-      }
-    }, 5 * 60 * 1000); // Check every 5 minutes
-
-    return () => clearInterval(checkTokenInterval);
-  }, [isAuthenticated, authValues.expires_at, authValues.refresh_token]);
-
-  // Handle dynamic dropdown loading
-  const handleFetchDynamicDropdown = async (input) => {
-    if (!input.dataSource) return;
-
-    let url = input.dataSource.url;
-
-    // Replace placeholders with actual input values
-    Object.keys(inputValues).forEach((key) => {
-      url = url.replace(`{${key}}`, inputValues[key]);
-    });
-
-    try {
-      setLoading(true);
-      const headers = {};
-
-      // Add auth header for API calls
-      if (config.auth?.type === "API_KEY") {
-        const apiKeyField = config.auth.fields[0];
-        headers.Authorization = `Bearer ${authValues[apiKeyField.key]}`;
-      }
-
-      const response = await makeApiCall(url, { headers });
-
-      // Handle different response structures dynamically
-      let items = [];
-      if (input.dataSource.responseField) {
-        items = response[input.dataSource.responseField] || [];
-      } else if (response.bases) {
-        items = response.bases;
-      } else if (response.tables) {
-        items = response.tables;
-      } else if (Array.isArray(response)) {
-        items = response;
-      } else {
-        items = [];
-      }
-
-      const options = items.map((item) => ({
-        label: item[input.dataSource.labelField],
-        value: item[input.dataSource.valueField],
-      }));
-
-      setDropdownData((prev) => ({ ...prev, [input.key]: options }));
-    } catch (error) {
-      console.error("Error loading dynamic dropdown:", error);
-      toast.error(`Failed to load ${input.label} options`);
-      setError(`Failed to load ${input.label} options`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Load independent dropdowns after authentication
-  useEffect(() => {
-    if (isAuthenticated) {
-      config.inputs?.forEach((input) => {
-        if (input.type === "dynamic_dropdown" && !input.dependsOn) {
-          handleFetchDynamicDropdown(input);
-        }
-      });
-    }
-  }, [isAuthenticated, authValues]);
-
-  // Load dependent dropdowns when their specific dependencies change
-  useEffect(() => {
-    if (isAuthenticated) {
-      config.inputs?.forEach((input) => {
-        if (input.type === "dynamic_dropdown" && input.dependsOn) {
-          const dependencyValue = inputValues[input.dependsOn];
-          if (dependencyValue) {
-            handleFetchDynamicDropdown(input);
-          } else {
-            // Clear dependent dropdown if dependency is cleared
-            setDropdownData((prev) => ({ ...prev, [input.key]: [] }));
-          }
-        }
-      });
-    }
-  }, [inputValues.baseId, isAuthenticated]);
-
-  // Dynamic fetch records function
-  const fetchRecords = async () => {
-    setError("");
+  // --- Block Execute Universal API Call ---
+  const callBlockExecute = async (operationType, operationParams = {}) => {
     setLoading(true);
-
+    setError("");
     try {
-      // const records = await executeOperation("fetch");
-      const raw = await executeOperation("fetch");
+      // For record actions, merge config.input values, editingId, and special fields
+      const params = { ...inputValues, ...operationParams };
 
-      // normalize each record’s fields based on your config.inputs[].type
-      const records = raw.map((rec) => {
-        const fields = { ...rec.fields };
+      // If possible, helpfully add dataFields/valuesArray for configs that use those
+      if (!params.dataFields) params.dataFields = buildDataFields();
+      if (!params.valuesArray) params.valuesArray = buildValuesArray();
 
-        config.inputs.forEach((input) => {
-          const key = input.key;
-          const val = fields[key];
-          if (val == null) return; // nothing to do
-          switch (input.type) {
-            case "number":
-              // Airtable might give you a number or a string-number:
-              fields[key] = Number(val);
-              break;
+      // For Airtable, recordId is needed for update/delete
+      if (
+        (operationType === "update" || operationType === "delete") &&
+        editingId !== null &&
+        !params.recordId
+      ) {
+        params.recordId = editingId;
+      }
 
-            case "date":
-              // <input type="date"> wants "YYYY-MM-DD", so leave it as a string,
-              // or wrap in new Date(val) if you need a Date object elsewhere.
-              fields[key] = val;
-              break;
-
-            case "json":
-              // parse the JSON string back into an object
-              try {
-                fields[key] = JSON.parse(val);
-              } catch (e) {
-                console.warn(`Invalid JSON in ${key} for rec ${rec.id}`, e);
-                fields[key] = {};
-              }
-              break;
-
-            default:
-              // text, email, key_value, etc., stay as strings
-              fields[key] = val;
-          }
-        });
-
-        return { ...rec, fields };
+      // Setup payload as per new backend spec, always POST to the backend
+      const res = await axios.post("http://localhost:5000/block/execute", {
+        blockId: config.id,
+        operation: operationType,
+        params,
+        credentials: getCredentials(),
       });
 
-      // setRecords(records);
-      console.log("records", records);
-
-      setRecords(records);
-      toast.success(`Successfully loaded ${records?.length} records`);
-    } catch (error) {
-      console.error("Fetch records failed:", error);
-      const errorMessage =
-        error.message ||
-        "Failed to fetch records. Please check your permissions.";
-      setError(errorMessage);
-      toast.error(errorMessage);
-    } finally {
       setLoading(false);
+      return res.data;
+    } catch (err) {
+      setLoading(false);
+      const msg =
+        err?.response?.data?.error || err.message || "Block execution failed";
+      setError(msg);
+      toast.error(msg);
+      throw err;
     }
   };
 
-  // Dynamic submit function
+  // --- CRUD/Fetch Utilities ---
+  const fetchRecords = async () => {
+    try {
+      const res = await callBlockExecute("fetch");
+      // Use output.fields to normalize records if possible, else pass raw
+      let processed = res;
+      if (Array.isArray(res)) processed = res;
+      else if (res.records) processed = res.records;
+      else if (res.data) processed = res.data;
+      else if (res.result) processed = res.result;
+      else processed = [];
+      setRecords(processed);
+      toast.success(`Loaded ${processed.length || 0} records`);
+    } catch (e) {
+      // error already handled
+    }
+  };
+
   const handleSubmit = async () => {
     // Validate required fields
     const missingFields = getDataFields()
-      .filter((input) => input.required)
-      .filter((input) => !inputValues[input.key])
-      .map((input) => input.label);
+      .filter((f) => f.required)
+      .filter((f) => !inputValues[f.key])
+      .map((f) => f.label);
 
     if (missingFields.length > 0) {
       const errorMessage = `Please fill in: ${missingFields.join(", ")}`;
@@ -458,337 +177,152 @@ export default function DynamicApiBlock({}) {
       toast.warn(errorMessage);
       return;
     }
-
     setLoading(true);
     setError("");
 
     try {
       const operationType = editingId !== null ? "update" : "create";
       const params = editingId !== null ? { recordId: editingId } : {};
-
-      await executeOperation(operationType, params);
-      // Show success message
-      const successMessage =
-        editingId !== null
-          ? "Record updated successfully!"
-          : "Record created successfully!";
-      toast.success(successMessage);
-
-      // Reset form
+      await callBlockExecute(operationType, params);
+      toast.success(editingId !== null ? "Record updated!" : "Record added!");
+      // Reset inputs & refresh records
       const resetFields = {};
-      getDataFields().forEach((input) => {
-        resetFields[input.key] = "";
-      });
+      getDataFields().forEach((f) => (resetFields[f.key] = ""));
       setInputValues((prev) => ({ ...prev, ...resetFields }));
       setEditingId(null);
-      // Refresh records
       await fetchRecords();
-    } catch (error) {
-      console.error("Submit failed:", error);
-      const errorMessage =
-        error.message ||
-        `Failed to ${editingId !== null ? "update" : "add"} record`;
-      setError(errorMessage);
-      toast.error(errorMessage);
+    } catch (e) {
+      // error handled
     } finally {
       setLoading(false);
     }
   };
 
-  // Dynamic delete function
   const handleDelete = async (id) => {
     if (!window.confirm("Are you sure you want to delete this record?")) {
       return;
     }
-
     setLoading(true);
     setError("");
-
     try {
-      await executeOperation("delete", { recordId: id });
-      toast.success("Record deleted successfully!");
+      await callBlockExecute("delete", { recordId: id });
+      toast.success("Record deleted!");
       await fetchRecords();
-    } catch (error) {
-      console.error("Delete failed:", error);
-      const errorMessage = error.message || "Failed to delete record";
-      setError(errorMessage);
-      toast.error(errorMessage);
+    } catch (e) {
+      // error handled
     } finally {
       setLoading(false);
     }
   };
 
-  // Handle OAuth authentication for Google services
+  // --- OAuth/Credential Handling ---
   useEffect(() => {
-    const hash = window.location.hash;
+    // On OAuth callback
     const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (code) {
+      const exchangeCodeForTokens = async () => {
+        try {
+          setLoading(true);
+          const clientId = authValues.clientId;
+          const secretId = authValues.secretId;
+          const resp = await axios.post(`${config.baseurl}/oauth/callback`, {
+            code,
+            redirect_uri: config.auth.redirectUri,
+            client_id: clientId,
+            client_secret: secretId,
+          });
+          handleOAuthSuccess(resp.data);
+          setIsAuthenticated(true);
+          toast.success("Successfully authenticated!");
+          window.history.replaceState(null, null, window.location.pathname);
+        } catch (error) {
+          toast.error("Authentication failed. Please try again.");
+        } finally {
+          setLoading(false);
+        }
+      };
+      exchangeCodeForTokens();
+    }
 
-    // Handle OAuth redirect for Google Sheets and Gmail
+    // Legacy hash-based
+    const hash = window.location.hash;
     if (hash.includes("access_token")) {
       const hashParams = new URLSearchParams(hash.substring(1));
       const token = hashParams.get("access_token");
       if (token) {
-        setAuthValues((prev) => ({
-          ...prev,
-          access_token: token,
-        }));
+        handleOAuthSuccess({ access_token: token, token_type: "Bearer" });
         setIsAuthenticated(true);
         toast.success("Successfully authenticated!");
         window.history.replaceState(null, null, window.location.pathname);
       }
-    } else if (params.get("access_token")) {
-      // Handle query parameter format
-      const token = params.get("access_token");
-      if (token) {
-        setAuthValues((prev) => ({
-          ...prev,
-          access_token: token,
-        }));
-        setIsAuthenticated(true);
-        toast.success("Successfully authenticated!");
-        // window?.history.replaceState({}, document?.title, "/");
-      }
     }
   }, []);
 
-  const handleOAuthSuccess = (tokenData) => {
-    const expiresIn = tokenData.expires_in || 3600; // Default 1 hour
-    const expiresAt = tokenData.expires_at || Date.now() + expiresIn * 1000;
+  // Proactive token refresh (optional, for OAuth flows)
+  useEffect(() => {
+    if (
+      !isAuthenticated ||
+      !authValues.refresh_token ||
+      !authValues.clientId ||
+      !authValues.secretId
+    )
+      return;
+    const interval = setInterval(() => {
+      const expiresAt = authValues.expires_at;
+      if (!expiresAt) return;
+      // Refresh 10 minutes before expiry
+      const bufferTime = 10 * 60 * 1000;
+      if (Date.now() > expiresAt - bufferTime) {
+        axios
+          .post(`${config.baseurl}/oauth/refresh`, {
+            refresh_token: authValues.refresh_token,
+            client_id: authValues.clientId,
+            client_secret: authValues.secretId,
+          })
+          .then((response) => {
+            handleOAuthSuccess(response.data);
+            toast.info("Access token refreshed automatically");
+          })
+          .catch(() => {
+            setIsAuthenticated(false);
+            setAuthValues({});
+            toast.error("Session expired. Please log in again.");
+          });
+      }
+    }, 5 * 60 * 1000); // Check every 5 min
+    return () => clearInterval(interval);
+  }, [
+    isAuthenticated,
+    authValues.expires_at,
+    authValues.refresh_token,
+    authValues.clientId,
+    authValues.secretId,
+  ]);
 
+  const handleOAuthSuccess = (tokenData) => {
+    const expiresIn = tokenData.expires_in || 3600;
+    const expiresAt = tokenData.expires_at || Date.now() + expiresIn * 1000;
     setAuthValues((prev) => ({
       ...prev,
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
       expires_at: expiresAt,
       token_type: tokenData.token_type || "Bearer",
+      ...(tokenData.client_id ? { clientId: tokenData.client_id } : {}),
+      ...(tokenData.client_secret ? { secretId: tokenData.client_secret } : {}),
     }));
-
-    console.log("Token stored:", {
-      expires_at: new Date(expiresAt),
-      has_refresh: !!tokenData.refresh_token,
-    });
   };
 
-  const makeApiCallWithTokenRefresh = async (url, options = {}) => {
-    try {
-      const axiosConfig = {
-        url,
-        method: options.method || "GET",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${authValues.access_token}`,
-          "X-Refresh-Token": authValues.refresh_token,
-          ...options.headers,
-        },
-        data: options.body ? options.body : undefined,
-      };
-
-      // Include token data in request body for backend validation
-      if (axiosConfig.method !== "GET" && axiosConfig.data) {
-        axiosConfig.data = {
-          ...axiosConfig.data,
-          access_token: authValues.access_token,
-          refresh_token: authValues.refresh_token,
-          expires_at: authValues.expires_at,
-        };
-      }
-
-      const response = await axios(axiosConfig);
-
-      // Check if backend refreshed the token
-      const newAccessToken = response.headers["x-new-access-token"];
-      if (newAccessToken && response.headers["x-token-refreshed"] === "true") {
-        console.log("Token was refreshed by backend");
-        setAuthValues((prev) => ({
-          ...prev,
-          access_token: newAccessToken,
-          expires_at: Date.now() + 3600 * 1000, // Reset expiration
-        }));
-        toast.info("Access token refreshed automatically");
-      }
-
-      return response.data;
-    } catch (error) {
-      console.error("API call error:", error);
-
-      // Handle authentication errors
-      if (error.response && [401, 403].includes(error.response.status)) {
-        const errorData = error.response.data;
-
-        if (errorData.requiresReauth) {
-          console.log("Refresh failed, requiring re-authentication");
-          setIsAuthenticated(false);
-          setAuthValues({});
-          toast.error("Session expired. Please log in again.");
-          return;
-        }
-
-        // Try to refresh token manually if backend didn't handle it
-        if (authValues.refresh_token) {
-          try {
-            const refreshResponse = await axios.post(
-              `${config.baseurl}/oauth/refresh`,
-              {
-                refresh_token: authValues.refresh_token,
-              }
-            );
-
-            const newTokenData = refreshResponse.data;
-            handleOAuthSuccess(newTokenData);
-
-            // Retry the original request with new token
-            const retryConfig = {
-              ...axiosConfig,
-              headers: {
-                ...axiosConfig.headers,
-                Authorization: `Bearer ${newTokenData.access_token}`,
-              },
-            };
-
-            if (retryConfig.data) {
-              retryConfig.data.access_token = newTokenData.access_token;
-            }
-
-            const retryResponse = await axios(retryConfig);
-            toast.success("Token refreshed and request completed");
-            return retryResponse.data;
-          } catch (refreshError) {
-            console.error("Manual token refresh failed:", refreshError);
-            setIsAuthenticated(false);
-            setAuthValues({});
-            toast.error("Session expired. Please log in again.");
-            return;
-          }
-        }
-      }
-
-      // Re-throw other errors
-      if (error.response) {
-        toast.error(
-          `API call failed: ${error.response.status} ${error.response.statusText}`
-        );
-      }
-      throw error;
-    }
-  };
-
-  // Handle authentication
-  const handleAuth = () => {
-    const authType = config.auth?.type;
-    const flowType = config.auth?.flow;
-
-    if (flowType === "REDIRECT" && authType === "OAUTH2") {
-      const clientIdField = config.auth.fields?.find(
-        (field) => field.key === "clientId"
-      );
-      const clientId = authValues[clientIdField?.key];
-
-      if (!clientId) {
-        const errorMessage = "Please enter your Client ID";
-        setError(errorMessage);
-        toast.warn(errorMessage);
-        return;
-      }
-
-      const redirectUri = config.auth.redirectUri;
-      const scope = config.auth.scopes;
-
-      // Enhanced OAuth URL with offline access for refresh tokens
-      const authUrl = `${
-        config.auth.authUrl
-      }?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${encodeURIComponent(
-        scope
-      )}&access_type=offline&prompt=consent&include_granted_scopes=true`;
-
-      window.location.href = authUrl;
-      return;
-    }
-
-    // Handle manual input-based auth (API Key, etc.)
-    if (config.auth?.fields?.length) {
-      const missingFields = config.auth.fields
-        .filter((field) => field.required)
-        .filter((field) => !authValues[field.key])
-        .map((field) => field.label);
-
-      if (missingFields.length > 0) {
-        const errorMessage = `Please enter: ${missingFields.join(", ")}`;
-        setError(errorMessage);
-        toast.warn(errorMessage);
-        return;
-      }
-
-      setIsAuthenticated(true);
-      setError("");
-      toast.success("Successfully authenticated!");
-    }
-  };
-
-  // Update OAuth redirect handling to work with authorization code
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-
-    if (code) {
-      // Exchange authorization code for tokens
-      const exchangeCodeForTokens = async () => {
-        try {
-          setLoading(true);
-          const response = await axios.post(
-            `${config.baseurl}/oauth/callback`,
-            {
-              code,
-              redirect_uri: config.auth.redirectUri,
-            }
-          );
-
-          const tokenData = response.data;
-          handleOAuthSuccess(tokenData);
-          setIsAuthenticated(true);
-          toast.success("Successfully authenticated!");
-
-          // Clean up URL
-          window.history.replaceState(null, null, window.location.pathname);
-        } catch (error) {
-          console.error("Token exchange failed:", error);
-          toast.error("Authentication failed. Please try again.");
-        } finally {
-          setLoading(false);
-        }
-      };
-
-      exchangeCodeForTokens();
-    }
-
-    // Keep the existing hash-based token handling for backward compatibility
-    const hash = window.location.hash;
-    if (hash.includes("access_token")) {
-      const hashParams = new URLSearchParams(hash.substring(1));
-      const token = hashParams.get("access_token");
-      if (token) {
-        handleOAuthSuccess({
-          access_token: token,
-          token_type: "Bearer",
-        });
-        setIsAuthenticated(true);
-        toast.success("Successfully authenticated!");
-        window.history.replaceState(null, null, window.location.pathname);
-      }
-    }
-  }, []);
-
-  // Reset form
+  // --- UI Rendering ---
   const resetForm = () => {
     setEditingId(null);
     const resetFields = {};
-    getDataFields().forEach((input) => {
-      resetFields[input.key] = "";
-    });
+    getDataFields().forEach((input) => (resetFields[input.key] = ""));
     setInputValues((prev) => ({ ...prev, ...resetFields }));
     setError("");
   };
 
-  // Render input field based on type
   const renderInput = (field) => {
     const baseClasses =
       "w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200";
@@ -816,7 +350,6 @@ export default function DynamicApiBlock({}) {
             ))}
           </select>
         );
-
       case "textarea":
         return (
           <textarea
@@ -833,7 +366,6 @@ export default function DynamicApiBlock({}) {
             className={baseClasses}
           />
         );
-
       case "checkbox":
         return (
           <div className="flex items-center">
@@ -852,7 +384,6 @@ export default function DynamicApiBlock({}) {
             <label className="ml-2 text-sm text-gray-700">{field.label}</label>
           </div>
         );
-
       case "key_value":
         return (
           <div className="mb-4 flex gap-2 items-center">
@@ -874,7 +405,6 @@ export default function DynamicApiBlock({}) {
                 </option>
               ))}
             </select>
-
             <input
               type="text"
               placeholder={field.valueFieldLabel || "Enter value"}
@@ -890,7 +420,6 @@ export default function DynamicApiBlock({}) {
             />
           </div>
         );
-
       case "json":
         return (
           <div className="border border-gray-300 rounded p-2">
@@ -921,7 +450,6 @@ export default function DynamicApiBlock({}) {
             />
           </div>
         );
-
       default:
         return (
           <input
@@ -941,20 +469,128 @@ export default function DynamicApiBlock({}) {
     }
   };
 
-  // Get display fields for table (use config output or all data fields)
   const getDisplayFields = () => {
-    if (config.output?.fields) {
-      return config.output.fields;
-    }
+    if (config.output?.fields) return config.output.fields;
     return getDataFields().map((field) => field.key);
   };
 
+  // --- Dropdown Dynamic Loaders (unchanged) ---
+  const handleFetchDynamicDropdown = async (input) => {
+    if (!input.dataSource) return;
+    let url = input.dataSource.url;
+    Object.keys(inputValues).forEach((key) => {
+      url = url.replace(`{${key}}`, inputValues[key]);
+    });
+    try {
+      setLoading(true);
+      const headers = {};
+      if (config.auth?.type === "API_KEY") {
+        const apiKeyField = config.auth.fields[0];
+        headers.Authorization = `Bearer ${authValues[apiKeyField.key]}`;
+      }
+      const response = await axios.get(url, { headers });
+      let items = [];
+      if (input.dataSource.responseField) {
+        items = response.data[input.dataSource.responseField] || [];
+      } else if (response.data.bases) {
+        items = response.data.bases;
+      } else if (response.data.tables) {
+        items = response.data.tables;
+      } else if (Array.isArray(response.data)) {
+        items = response.data;
+      } else {
+        items = [];
+      }
+      const options = items.map((item) => ({
+        label: item[input.dataSource.labelField],
+        value: item[input.dataSource.valueField],
+      }));
+      setDropdownData((prev) => ({ ...prev, [input.key]: options }));
+    } catch (error) {
+      toast.error(`Failed to load ${input.label} options`);
+      setError(`Failed to load ${input.label} options`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- Dropdowns: Loaders on mount and when dependencies change ---
+  useEffect(() => {
+    if (isAuthenticated) {
+      config.inputs?.forEach((input) => {
+        if (input.type === "dynamic_dropdown" && !input.dependsOn) {
+          handleFetchDynamicDropdown(input);
+        }
+      });
+    }
+    // eslint-disable-next-line
+  }, [isAuthenticated, authValues]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      config.inputs?.forEach((input) => {
+        if (input.type === "dynamic_dropdown" && input.dependsOn) {
+          const dependencyValue = inputValues[input.dependsOn];
+          if (dependencyValue) {
+            handleFetchDynamicDropdown(input);
+          } else {
+            setDropdownData((prev) => ({ ...prev, [input.key]: [] }));
+          }
+        }
+      });
+    }
+    // eslint-disable-next-line
+  }, [inputValues.baseId, isAuthenticated]);
+
+  // --- Authentication Handler (for OAUTH2/Manual) ---
+  const handleAuth = () => {
+    const authType = config.auth?.type;
+    const flowType = config.auth?.flow;
+
+    if (flowType === "REDIRECT" && authType === "OAUTH2") {
+      const clientIdField = config.auth.fields?.find(
+        (field) => field.key === "clientId"
+      );
+      const clientId = authValues[clientIdField?.key];
+
+      if (!clientId) {
+        const errorMessage = "Please enter your Client ID";
+        setError(errorMessage);
+        toast.warn(errorMessage);
+        return;
+      }
+      const redirectUri = config.auth.redirectUri;
+      const scope = config.auth.scopes;
+      const authUrl = `${
+        config.auth.authUrl
+      }?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${encodeURIComponent(
+        scope
+      )}&access_type=offline&prompt=consent&include_granted_scopes=true`;
+      window.location.href = authUrl;
+      return;
+    }
+    if (config.auth?.fields?.length) {
+      const missingFields = config.auth.fields
+        .filter((field) => field.required)
+        .filter((field) => !authValues[field.key])
+        .map((field) => field.label);
+      if (missingFields.length > 0) {
+        const errorMessage = `Please enter: ${missingFields.join(", ")}`;
+        setError(errorMessage);
+        toast.warn(errorMessage);
+        return;
+      }
+      setIsAuthenticated(true);
+      setError("");
+      toast.success("Successfully authenticated!");
+    }
+  };
+
+  // ----------- UI ------------
   if (!isAuthenticated) {
     const authFlow = config.auth?.flow;
     const hasFields = config.auth?.fields?.length > 0;
-    const isManualFlow = authFlow === "MANUAL";
     const isRedirectFlow = authFlow === "REDIRECT";
-
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
         <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
@@ -967,15 +603,12 @@ export default function DynamicApiBlock({}) {
             </h1>
             <p className="text-gray-600">{config.description}</p>
           </div>
-
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4">
               {error}
             </div>
           )}
-
           <div className="space-y-4">
-            {/* Render input fields for both MANUAL and REDIRECT flows if fields exist */}
             {hasFields &&
               config.auth.fields.map((field) => (
                 <div key={field.key}>
@@ -1000,8 +633,6 @@ export default function DynamicApiBlock({}) {
                   />
                 </div>
               ))}
-
-            {/* Dynamic button for authentication */}
             <button
               onClick={handleAuth}
               disabled={loading}
@@ -1038,16 +669,14 @@ export default function DynamicApiBlock({}) {
           </div>
         </div>
       </div>
-
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Error Alert */}
+        {/* Error */}
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6">
             {error}
           </div>
         )}
-
-        {/* Configuration Section - Show only for services that need it */}
+        {/* Config fields */}
         {getConfigFields().length > 0 && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-8">
             <div className="px-6 py-4 border-b border-gray-200">
@@ -1069,7 +698,6 @@ export default function DynamicApiBlock({}) {
                   </div>
                 ))}
               </div>
-
               <div className="mt-6">
                 <button
                   onClick={fetchRecords}
@@ -1093,8 +721,7 @@ export default function DynamicApiBlock({}) {
             </button>
           </div>
         )}
-
-        {/* Add/Edit Form - Show only if there are data fields to display */}
+        {/* Add/Edit Form */}
         {getDataFields().length > 0 && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-8">
             <div className="px-6 py-4 border-b border-gray-200">
@@ -1115,7 +742,7 @@ export default function DynamicApiBlock({}) {
             <div className="p-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 {getDataFields().map((field) => {
-                  if (field.visible === false) return null; // Skip rendering if visible is false
+                  if (field.visible === false) return null;
                   return (
                     <div key={field.key}>
                       <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1129,7 +756,6 @@ export default function DynamicApiBlock({}) {
                   );
                 })}
               </div>
-
               <div className="mt-6 flex gap-3">
                 <button
                   onClick={handleSubmit}
@@ -1142,7 +768,6 @@ export default function DynamicApiBlock({}) {
                     ? "Update Record"
                     : "Add Record"}
                 </button>
-
                 {editingId !== null && (
                   <button
                     onClick={resetForm}
@@ -1155,7 +780,6 @@ export default function DynamicApiBlock({}) {
             </div>
           </div>
         )}
-
         {/* Records Table */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200">
           <div className="px-6 py-4 border-b border-gray-200">
@@ -1175,7 +799,6 @@ export default function DynamicApiBlock({}) {
               </div>
             </div>
           </div>
-
           {records.length === 0 ? (
             <div className="p-12 text-center">
               <FileText className="w-12 h-12 text-gray-400 mx-auto mb-4" />
@@ -1213,7 +836,6 @@ export default function DynamicApiBlock({}) {
                     )}
                   </tr>
                 </thead>
-
                 <tbody className="bg-white divide-y divide-gray-200">
                   {records.map((rec, idx) => (
                     <tr
@@ -1225,14 +847,11 @@ export default function DynamicApiBlock({}) {
                           {idx + 1}
                         </td>
                       )}
-
                       {getDisplayFields().map((field) => {
                         const inputDef = config.inputs.find(
                           (i) => i.key === field
                         );
                         const value = rec.fields?.[field];
-
-                        // JSON‐type column
                         if (inputDef?.type === "json") {
                           return (
                             <td
@@ -1255,8 +874,6 @@ export default function DynamicApiBlock({}) {
                             </td>
                           );
                         }
-
-                        // All other types
                         return (
                           <td
                             key={field}
@@ -1266,7 +883,6 @@ export default function DynamicApiBlock({}) {
                           </td>
                         );
                       })}
-
                       {hasActions && (
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                           <div className="flex space-x-2">
@@ -1277,7 +893,6 @@ export default function DynamicApiBlock({}) {
                                     ? idx
                                     : rec.id;
                                 setEditingId(recordId);
-
                                 // populate form inputs
                                 const updated = {};
                                 getDataFields().forEach((input) => {
@@ -1295,7 +910,6 @@ export default function DynamicApiBlock({}) {
                             >
                               <Pencil className="w-4 h-4" />
                             </button>
-
                             <button
                               onClick={() =>
                                 handleDelete(

@@ -156,6 +156,12 @@
           "key": "clientId",
           "type": "text",
           "required": true
+        },
+        {
+          "label": "Secret ID",
+          "key": "secretId",
+          "type": "text",
+          "required": true
         }
       ]
     },
@@ -204,6 +210,12 @@
         {
           "label": "Client ID",
           "key": "clientId",
+          "type": "text",
+          "required": true
+        },
+        {
+          "label": "Secret ID",
+          "key": "secretId",
           "type": "text",
           "required": true
         }
