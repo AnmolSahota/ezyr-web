@@ -1,21 +1,59 @@
+"use client";
 import { useServiceCode } from "@/context/ServiceCodeContext";
 import axios from "axios";
 import { FileText, Lock, Pencil, Trash, X } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 import { toast } from "react-toastify";
-import ReactJson from "react-json-view"; // 👈 import this at top
+const ReactJson = dynamic(() => import("react-json-view"), { ssr: false });
+
+function usePersistedState(key, defaultValue) {
+  const [state, setState] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(key);
+      return stored != null ? JSON.parse(stored) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(state));
+    } catch {
+      // ignore write errors (quota, disabled, etc.)
+    }
+  }, [key, state]);
+
+  return [state, setState];
+}
 
 export default function DynamicApiBlock({}) {
   const { config } = useServiceCode();
 
   if (!config) return <p>Loading...</p>;
-  const [authValues, setAuthValues] = useState({});
-  const [inputValues, setInputValues] = useState({});
+  // instead of useState, import your helper:
+  const [authValues, setAuthValues] = usePersistedState(
+    "DynamicApiBlock.authValues",
+    {}
+  );
+  const [inputValues, setInputValues] = usePersistedState(
+    "DynamicApiBlock.inputValues",
+    {}
+  );
+  const [editingId, setEditingId] = usePersistedState(
+    "DynamicApiBlock.editingId",
+    null
+  );
+  const [isAuthenticated, setIsAuthenticated] = usePersistedState(
+    "DynamicApiBlock.isAuthenticated",
+    false
+  );
+
+  // everything else stays as normal useState:
   const [records, setRecords] = useState([]);
-  const [editingId, setEditingId] = useState(null);
   const [dropdownData, setDropdownData] = useState({});
   const [loading, setLoading] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [error, setError] = useState("");
 
   if (!config) {
@@ -79,21 +117,32 @@ export default function DynamicApiBlock({}) {
     if (!payload) return null;
 
     let processedPayload = JSON.parse(JSON.stringify(payload));
-    
+
     const allValues = { ...inputValues, ...authValues, ...params };
-    console.log("processedPayload", processedPayload);
-    console.log("allValues", allValues);
 
     const replacePlaceholders = (obj) => {
+      console.log("obj", obj);
+
       if (typeof obj === "string") {
         // Handle special placeholders
         if (obj === "{dataFields}") {
           const fields = {};
           getDataFields().forEach((field) => {
             const value = inputValues[field.key];
-            if (value !== undefined && value !== "") {
-              fields[field.key] =
-                field.type === "number" ? Number(value) : value;
+            if (value === undefined || value === "") return;
+
+            switch (field.type) {
+              case "number":
+                fields[field.key] = Number(value);
+                break;
+
+              case "json":
+                // stringify the object so Airtable long-text can store it
+                fields[field.key] = JSON.stringify(value);
+                break;
+
+              default:
+                fields[field.key] = value;
             }
           });
           return fields;
@@ -170,7 +219,8 @@ export default function DynamicApiBlock({}) {
     }
   };
 
-  // Dynamic operation executor
+  //  Replace all makeApiCall calls with makeApiCallWithTokenRefresh
+  // Update your executeOperation function
   const executeOperation = async (operationType, params = {}) => {
     const operation = config.operations?.[operationType];
 
@@ -195,20 +245,18 @@ export default function DynamicApiBlock({}) {
 
     // Build payload
     const payload = replacePayloadPlaceholders(operation.payload, params);
-    console.log("payload line 194", payload);
 
-    return {};
     // Build headers
     const headers = getAuthHeader(operation);
 
-    // Make API call
+    // Make API call with token refresh handling
     const options = {
       method: operation.method,
       headers,
       body: payload,
     };
 
-    const response = await makeApiCall(url, options);
+    const response = await makeApiCallWithTokenRefresh(url, options);
 
     // Extract data based on responseField
     let data = response;
@@ -217,6 +265,39 @@ export default function DynamicApiBlock({}) {
     }
     return data;
   };
+
+  //    Add token refresh check interval
+  useEffect(() => {
+    if (!isAuthenticated || !authValues.refresh_token) return;
+
+    const checkTokenInterval = setInterval(() => {
+      const expiresAt = authValues.expires_at;
+      if (!expiresAt) return;
+
+      // Check if token expires in next 10 minutes
+      const bufferTime = 10 * 60 * 1000; // 10 minutes
+      if (Date.now() > expiresAt - bufferTime) {
+        console.log("Token expires soon, refreshing...");
+
+        // Refresh token proactively
+        axios
+          .post(`${config.baseurl}/oauth/refresh`, {
+            refresh_token: authValues.refresh_token,
+          })
+          .then((response) => {
+            const newTokenData = response.data;
+            handleOAuthSuccess(newTokenData);
+            console.log("Token refreshed proactively");
+          })
+          .catch((error) => {
+            console.error("Proactive token refresh failed:", error);
+            // Don't force logout here, let the next API call handle it
+          });
+      }
+    }, 5 * 60 * 1000); // Check every 5 minutes
+
+    return () => clearInterval(checkTokenInterval);
+  }, [isAuthenticated, authValues.expires_at, authValues.refresh_token]);
 
   // Handle dynamic dropdown loading
   const handleFetchDynamicDropdown = async (input) => {
@@ -304,7 +385,49 @@ export default function DynamicApiBlock({}) {
     setLoading(true);
 
     try {
-      const records = await executeOperation("fetch");
+      // const records = await executeOperation("fetch");
+      const raw = await executeOperation("fetch");
+
+      // normalize each record’s fields based on your config.inputs[].type
+      const records = raw.map((rec) => {
+        const fields = { ...rec.fields };
+
+        config.inputs.forEach((input) => {
+          const key = input.key;
+          const val = fields[key];
+          if (val == null) return; // nothing to do
+          switch (input.type) {
+            case "number":
+              // Airtable might give you a number or a string-number:
+              fields[key] = Number(val);
+              break;
+
+            case "date":
+              // <input type="date"> wants "YYYY-MM-DD", so leave it as a string,
+              // or wrap in new Date(val) if you need a Date object elsewhere.
+              fields[key] = val;
+              break;
+
+            case "json":
+              // parse the JSON string back into an object
+              try {
+                fields[key] = JSON.parse(val);
+              } catch (e) {
+                console.warn(`Invalid JSON in ${key} for rec ${rec.id}`, e);
+                fields[key] = {};
+              }
+              break;
+
+            default:
+              // text, email, key_value, etc., stay as strings
+              fields[key] = val;
+          }
+        });
+
+        return { ...rec, fields };
+      });
+
+      // setRecords(records);
       console.log("records", records);
 
       setRecords(records);
@@ -344,7 +467,6 @@ export default function DynamicApiBlock({}) {
       const params = editingId !== null ? { recordId: editingId } : {};
 
       await executeOperation(operationType, params);
-      return;
       // Show success message
       const successMessage =
         editingId !== null
@@ -424,10 +546,131 @@ export default function DynamicApiBlock({}) {
         }));
         setIsAuthenticated(true);
         toast.success("Successfully authenticated!");
-        window?.history.replaceState({}, document?.title, "/");
+        // window?.history.replaceState({}, document?.title, "/");
       }
     }
   }, []);
+
+  const handleOAuthSuccess = (tokenData) => {
+    const expiresIn = tokenData.expires_in || 3600; // Default 1 hour
+    const expiresAt = tokenData.expires_at || Date.now() + expiresIn * 1000;
+
+    setAuthValues((prev) => ({
+      ...prev,
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_at: expiresAt,
+      token_type: tokenData.token_type || "Bearer",
+    }));
+
+    console.log("Token stored:", {
+      expires_at: new Date(expiresAt),
+      has_refresh: !!tokenData.refresh_token,
+    });
+  };
+
+  const makeApiCallWithTokenRefresh = async (url, options = {}) => {
+    try {
+      const axiosConfig = {
+        url,
+        method: options.method || "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authValues.access_token}`,
+          "X-Refresh-Token": authValues.refresh_token,
+          ...options.headers,
+        },
+        data: options.body ? options.body : undefined,
+      };
+
+      // Include token data in request body for backend validation
+      if (axiosConfig.method !== "GET" && axiosConfig.data) {
+        axiosConfig.data = {
+          ...axiosConfig.data,
+          access_token: authValues.access_token,
+          refresh_token: authValues.refresh_token,
+          expires_at: authValues.expires_at,
+        };
+      }
+
+      const response = await axios(axiosConfig);
+
+      // Check if backend refreshed the token
+      const newAccessToken = response.headers["x-new-access-token"];
+      if (newAccessToken && response.headers["x-token-refreshed"] === "true") {
+        console.log("Token was refreshed by backend");
+        setAuthValues((prev) => ({
+          ...prev,
+          access_token: newAccessToken,
+          expires_at: Date.now() + 3600 * 1000, // Reset expiration
+        }));
+        toast.info("Access token refreshed automatically");
+      }
+
+      return response.data;
+    } catch (error) {
+      console.error("API call error:", error);
+
+      // Handle authentication errors
+      if (error.response && [401, 403].includes(error.response.status)) {
+        const errorData = error.response.data;
+
+        if (errorData.requiresReauth) {
+          console.log("Refresh failed, requiring re-authentication");
+          setIsAuthenticated(false);
+          setAuthValues({});
+          toast.error("Session expired. Please log in again.");
+          return;
+        }
+
+        // Try to refresh token manually if backend didn't handle it
+        if (authValues.refresh_token) {
+          try {
+            const refreshResponse = await axios.post(
+              `${config.baseurl}/oauth/refresh`,
+              {
+                refresh_token: authValues.refresh_token,
+              }
+            );
+
+            const newTokenData = refreshResponse.data;
+            handleOAuthSuccess(newTokenData);
+
+            // Retry the original request with new token
+            const retryConfig = {
+              ...axiosConfig,
+              headers: {
+                ...axiosConfig.headers,
+                Authorization: `Bearer ${newTokenData.access_token}`,
+              },
+            };
+
+            if (retryConfig.data) {
+              retryConfig.data.access_token = newTokenData.access_token;
+            }
+
+            const retryResponse = await axios(retryConfig);
+            toast.success("Token refreshed and request completed");
+            return retryResponse.data;
+          } catch (refreshError) {
+            console.error("Manual token refresh failed:", refreshError);
+            setIsAuthenticated(false);
+            setAuthValues({});
+            toast.error("Session expired. Please log in again.");
+            return;
+          }
+        }
+      }
+
+      // Re-throw other errors
+      if (error.response) {
+        toast.error(
+          `API call failed: ${error.response.status} ${error.response.statusText}`
+        );
+      }
+      throw error;
+    }
+  };
 
   // Handle authentication
   const handleAuth = () => {
@@ -435,7 +678,6 @@ export default function DynamicApiBlock({}) {
     const flowType = config.auth?.flow;
 
     if (flowType === "REDIRECT" && authType === "OAUTH2") {
-      // Get clientId from auth fields instead of config.auth.clientId
       const clientIdField = config.auth.fields?.find(
         (field) => field.key === "clientId"
       );
@@ -451,11 +693,12 @@ export default function DynamicApiBlock({}) {
       const redirectUri = config.auth.redirectUri;
       const scope = config.auth.scopes;
 
+      // Enhanced OAuth URL with offline access for refresh tokens
       const authUrl = `${
         config.auth.authUrl
-      }?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=token&scope=${encodeURIComponent(
+      }?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${encodeURIComponent(
         scope
-      )}&include_granted_scopes=true&prompt=consent`;
+      )}&access_type=offline&prompt=consent&include_granted_scopes=true`;
 
       window.location.href = authUrl;
       return;
@@ -480,6 +723,59 @@ export default function DynamicApiBlock({}) {
       toast.success("Successfully authenticated!");
     }
   };
+
+  // Update OAuth redirect handling to work with authorization code
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+
+    if (code) {
+      // Exchange authorization code for tokens
+      const exchangeCodeForTokens = async () => {
+        try {
+          setLoading(true);
+          const response = await axios.post(
+            `${config.baseurl}/oauth/callback`,
+            {
+              code,
+              redirect_uri: config.auth.redirectUri,
+            }
+          );
+
+          const tokenData = response.data;
+          handleOAuthSuccess(tokenData);
+          setIsAuthenticated(true);
+          toast.success("Successfully authenticated!");
+
+          // Clean up URL
+          window.history.replaceState(null, null, window.location.pathname);
+        } catch (error) {
+          console.error("Token exchange failed:", error);
+          toast.error("Authentication failed. Please try again.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      exchangeCodeForTokens();
+    }
+
+    // Keep the existing hash-based token handling for backward compatibility
+    const hash = window.location.hash;
+    if (hash.includes("access_token")) {
+      const hashParams = new URLSearchParams(hash.substring(1));
+      const token = hashParams.get("access_token");
+      if (token) {
+        handleOAuthSuccess({
+          access_token: token,
+          token_type: "Bearer",
+        });
+        setIsAuthenticated(true);
+        toast.success("Successfully authenticated!");
+        window.history.replaceState(null, null, window.location.pathname);
+      }
+    }
+  }, []);
 
   // Reset form
   const resetForm = () => {
@@ -917,25 +1213,60 @@ export default function DynamicApiBlock({}) {
                     )}
                   </tr>
                 </thead>
+
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {records.map((rec, index) => (
+                  {records.map((rec, idx) => (
                     <tr
-                      key={rec.id || index}
+                      key={rec.id || idx}
                       className="hover:bg-gray-50 transition-colors"
                     >
                       {config.servicecode === "googlesheets" && (
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {index + 1}
+                          {idx + 1}
                         </td>
                       )}
-                      {getDisplayFields().map((field) => (
-                        <td
-                          key={field}
-                          className="px-6 py-4 whitespace-nowrap text-sm text-gray-900"
-                        >
-                          {rec.fields ? rec.fields[field] || "-" : "-"}
-                        </td>
-                      ))}
+
+                      {getDisplayFields().map((field) => {
+                        const inputDef = config.inputs.find(
+                          (i) => i.key === field
+                        );
+                        const value = rec.fields?.[field];
+
+                        // JSON‐type column
+                        if (inputDef?.type === "json") {
+                          return (
+                            <td
+                              key={field}
+                              className="px-6 py-4 align-top whitespace-normal text-sm text-gray-900"
+                            >
+                              <ReactJson
+                                src={value || {}}
+                                name={false}
+                                collapsed={1}
+                                enableClipboard={false}
+                                displayDataTypes={false}
+                                displayObjectSize={false}
+                                theme="rjv-default"
+                                style={{
+                                  fontSize: "0.8rem",
+                                  lineHeight: "1.2",
+                                }}
+                              />
+                            </td>
+                          );
+                        }
+
+                        // All other types
+                        return (
+                          <td
+                            key={field}
+                            className="px-6 py-4 whitespace-nowrap text-sm text-gray-900"
+                          >
+                            {value ?? "-"}
+                          </td>
+                        );
+                      })}
+
                       {hasActions && (
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                           <div className="flex space-x-2">
@@ -943,38 +1274,37 @@ export default function DynamicApiBlock({}) {
                               onClick={() => {
                                 const recordId =
                                   config.servicecode === "googlesheets"
-                                    ? index
+                                    ? idx
                                     : rec.id;
                                 setEditingId(recordId);
-                                const updatedInputs = {};
-                                getDataFields().forEach((field) => {
-                                  if (
-                                    rec.fields &&
-                                    rec.fields[field.key] !== undefined
-                                  ) {
-                                    updatedInputs[field.key] =
-                                      rec.fields[field.key];
+
+                                // populate form inputs
+                                const updated = {};
+                                getDataFields().forEach((input) => {
+                                  if (rec.fields?.[input.key] != null) {
+                                    updated[input.key] = rec.fields[input.key];
                                   }
                                 });
                                 setInputValues((prev) => ({
                                   ...prev,
-                                  ...updatedInputs,
+                                  ...updated,
                                 }));
                               }}
-                              className="text-blue-600 hover:text-blue-900 transition-colors"
+                              className="text-blue-600 hover:text-blue-900 transition-colors cursor-pointer"
                               title="Edit"
                             >
                               <Pencil className="w-4 h-4" />
                             </button>
+
                             <button
                               onClick={() =>
                                 handleDelete(
                                   config.servicecode === "googlesheets"
-                                    ? index
+                                    ? idx
                                     : rec.id
                                 )
                               }
-                              className="text-red-600 hover:text-red-900 transition-colors"
+                              className="text-red-600 hover:text-red-900 transition-colors cursor-pointer"
                               title="Delete"
                             >
                               <Trash className="w-4 h-4" />

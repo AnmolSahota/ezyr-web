@@ -19,7 +19,16 @@ export default function EzyrHomepage() {
   const [isScrolled, setIsScrolled] = useState(false);
   const { setServiceCode, setConfig } = useContext(ServiceCodeContext);
   let router = useRouter();
+
+  const resetAndHome = () => {
+    localStorage.removeItem("DynamicApiBlock.authValues");
+    localStorage.removeItem("DynamicApiBlock.inputValues");
+    localStorage.removeItem("DynamicApiBlock.editingId");
+    localStorage.removeItem("DynamicApiBlock.isAuthenticated");
+  };
+
   useEffect(() => {
+    resetAndHome()
     const stored = localStorage.getItem("servicecode");
     if (stored) setServiceCode(stored);
   }, []);

@@ -94,7 +94,7 @@
     ],
     "output": {
       "type": "table",
-      "fields": ["Name", "Email", "Age", "Date", "Key", "Value"],
+      "fields": ["Name", "Email", "Age", "Date", "Key", "Value", "jsonview"],
       "actions": ["delete", "edit"]
     },
     "baseurl": "https://api.airtable.com/v0",
@@ -221,6 +221,13 @@
         "key": "email",
         "type": "email",
         "required": true
+      },
+      {
+        "label": "Additional Info",
+        "key": "jsonview",
+        "type": "json",
+        "required": false,
+        "description": "Provide structured data in JSON format."
       }
     ],
     "output": {

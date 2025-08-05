@@ -11,8 +11,17 @@ export default function Navbar() {
   const { setServiceCode } = useContext(ServiceCodeContext); // ✅ Correct usage
   const router = useRouter();
 
-  const handleHomeClick = () => {
+  const resetAndHome = () => {
+    localStorage.removeItem("DynamicApiBlock.authValues");
+    localStorage.removeItem("DynamicApiBlock.inputValues");
+    localStorage.removeItem("DynamicApiBlock.editingId");
+    localStorage.removeItem("DynamicApiBlock.isAuthenticated");
     localStorage.removeItem("servicecode");
+  };
+
+  const handleHomeClick = () => {
+    // localStorage.removeItem("servicecode");
+    resetAndHome()
     setServiceCode(null);
     router.push("/");
   };
@@ -29,11 +38,10 @@ export default function Navbar() {
 
   return (
     <nav
-      className={`w-full z-50 transition-all duration-300 ${
-        isScrolled
-          ? "bg-white/95 backdrop-blur-lg shadow-lg border-b border-gray-200"
-          : "bg-transparent"
-      }`}
+      className={` w-full z-50 transition-all duration-300 ${isScrolled
+        ? "bg-white/95 backdrop-blur-lg shadow-lg border-b border-gray-200"
+        : "bg-transparent"
+        }`}
     >
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center py-4">
